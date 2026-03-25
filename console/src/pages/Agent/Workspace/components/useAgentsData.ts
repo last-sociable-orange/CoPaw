@@ -1,64 +1,148 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { message } from "@agentscope-ai/design";
 import { useTranslation } from "react-i18next";
 import api from "../../../../api";
-import type { MarkdownFile, DailyMemoryFile } from "../../../../api/types";
+import type { FileTreeNode, DailyMemoryFile } from "../../../../api/types";
 import { workspaceApi } from "../../../../api/modules/workspace";
 import { agentsApi } from "../../../../api/modules/agents";
 import { useAgentStore } from "../../../../stores/agentStore";
 
-// Returns the parent directory of a file path, supporting both '/' and '\' separators.
-const getParentDir = (filePath: string): string => {
-  const match = filePath.match(/^(.*)[/\\]/);
-  return match ? match[1] : filePath;
+// Flatten tree to list of file paths (for enabled files ordering)
+const flattenFilePaths = (nodes: FileTreeNode[]): string[] => {
+  const paths: string[] = [];
+  for (const node of nodes) {
+    if (node.type === "file") {
+      paths.push(node.path);
+    } else if (node.children) {
+      paths.push(...flattenFilePaths(node.children));
+    }
+  }
+  return paths;
 };
+
+// Find a node by path in the tree
+const findNodeByPath = (
+  nodes: FileTreeNode[],
+  path: string,
+): FileTreeNode | null => {
+  for (const node of nodes) {
+    if (node.path === path) {
+      return node;
+    }
+    if (node.children) {
+      const found = findNodeByPath(node.children, path);
+      if (found) return found;
+    }
+  }
+  return null;
+};
+
+// Convert FileTreeNode to a file-like object for selection
+const nodeToSelectedFile = (node: FileTreeNode) => ({
+  filename: node.name,
+  path: node.path,
+  size: node.size,
+  created_time: node.modified_time,
+  modified_time: node.modified_time,
+  updated_at: new Date(node.modified_time).getTime(),
+});
 
 export const useAgentsData = () => {
   const { t } = useTranslation();
   const { selectedAgent } = useAgentStore();
-  const [files, setFiles] = useState<MarkdownFile[]>([]);
-  const [selectedFile, setSelectedFile] = useState<MarkdownFile | null>(null);
+  const [fileTree, setFileTree] = useState<FileTreeNode[]>([]);
+  const [selectedFile, setSelectedFile] = useState<
+    ReturnType<typeof nodeToSelectedFile> | null
+  >(null);
   const [dailyMemories, setDailyMemories] = useState<DailyMemoryFile[]>([]);
   const [expandedMemory, setExpandedMemory] = useState(false);
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(
+    new Set(),
+  );
   const [fileContent, setFileContent] = useState("");
   const [originalContent, setOriginalContent] = useState("");
   const [loading, setLoading] = useState(false);
   const [workspacePath, setWorkspacePath] = useState<string | null>(null);
   const [enabledFiles, setEnabledFiles] = useState<string[]>([]);
 
+  // Initialize expanded folders with common directories
+  useEffect(() => {
+    setExpandedFolders(new Set(["skills", "memory"]));
+  }, [selectedAgent]);
+
+  const fetchEnabledFiles = useCallback(async () => {
+    try {
+      const result = await workspaceApi.getSystemPromptFiles();
+      const enabled = Array.isArray(result) ? result : [];
+      setEnabledFiles(enabled);
+      return enabled;
+    } catch (error) {
+      console.error("Failed to fetch enabled files", error);
+      return [];
+    }
+  }, []);
+
+  const fetchFileTree = useCallback(
+    async (latestEnabledFiles?: string[]) => {
+      try {
+        // Fetch enabled files if not provided
+        if (!Array.isArray(latestEnabledFiles)) {
+          await fetchEnabledFiles();
+        }
+        const tree = await agentsApi.getAgentFileTree(selectedAgent);
+        setFileTree(tree);
+
+        // Set workspace path from first file if available
+        if (tree.length > 0) {
+          const firstFile = flattenFilePaths(tree)[0];
+          if (firstFile) {
+            const parts = firstFile.split("/");
+            parts.pop();
+            setWorkspacePath(parts.join("/") || ".");
+          }
+        } else {
+          setWorkspacePath("");
+        }
+      } catch (error) {
+        console.error("Failed to fetch file tree", error);
+        message.error("Failed to load file tree");
+      }
+    },
+    [selectedAgent, fetchEnabledFiles],
+  );
+
   useEffect(() => {
     const initializeData = async () => {
-      // Remember currently selected file name
-      const previouslySelectedFilename = selectedFile?.filename;
+      // Remember currently selected file path
+      const previouslySelectedPath = selectedFile?.path;
 
       // Clear content first
       setFileContent("");
       setOriginalContent("");
       setExpandedMemory(false);
 
-      const enabled = await fetchEnabledFiles();
-      const fileList = await agentsApi.listAgentFiles(selectedAgent);
-      const sortedFiles = sortFilesByEnabled(
-        fileList as unknown as MarkdownFile[],
-        enabled,
-      );
-      setFiles(sortedFiles);
+      await fetchEnabledFiles();
+      const tree = await agentsApi.getAgentFileTree(selectedAgent);
+      setFileTree(tree);
 
-      // Set workspace path (handle both Unix '/' and Windows '\' separators)
-      if (fileList.length > 0) {
-        setWorkspacePath(getParentDir(fileList[0].path));
+      // Set workspace path (handle both Unix '/' and Windows '\\' separators)
+      if (tree.length > 0) {
+        const firstFile = flattenFilePaths(tree)[0];
+        if (firstFile) {
+          const parts = firstFile.split("/");
+          parts.pop();
+          setWorkspacePath(parts.join("/") || ".");
+        }
       } else {
         setWorkspacePath("");
       }
 
       // Try to re-select the same file in new workspace
-      if (previouslySelectedFilename) {
-        const sameFile = sortedFiles.find(
-          (f) => f.filename === previouslySelectedFilename,
-        );
-        if (sameFile) {
+      if (previouslySelectedPath) {
+        const node = findNodeByPath(tree, previouslySelectedPath);
+        if (node && node.type === "file") {
           // Auto-load the same file from new workspace
-          await handleFileClick(sameFile);
+          await handleFileNodeClick(node);
         } else {
           // File doesn't exist in new workspace, clear selection
           setSelectedFile(null);
@@ -71,81 +155,6 @@ export const useAgentsData = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedAgent]);
 
-  // Re-sort when enabledFiles changes (for toggle/reorder operations)
-  useEffect(() => {
-    if (files.length > 0 && enabledFiles.length >= 0) {
-      const sortedFiles = sortFilesByEnabled(files, enabledFiles);
-
-      // Only update if order actually changed to avoid infinite loop
-      const orderChanged = sortedFiles.some(
-        (file, index) => file.filename !== files[index]?.filename,
-      );
-      if (orderChanged) {
-        setFiles(sortedFiles);
-      }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabledFiles]);
-
-  const fetchEnabledFiles = async () => {
-    try {
-      const result = await workspaceApi.getSystemPromptFiles();
-      const enabled = Array.isArray(result) ? result : [];
-      setEnabledFiles(enabled);
-      return enabled;
-    } catch (error) {
-      console.error("Failed to fetch enabled files", error);
-      return [];
-    }
-  };
-
-  const sortFilesByEnabled = (
-    fileList: MarkdownFile[],
-    currentEnabledFiles: string[],
-  ) => {
-    const safeEnabled = Array.isArray(currentEnabledFiles)
-      ? currentEnabledFiles
-      : [];
-    return [...fileList].sort((a, b) => {
-      const aIndex = safeEnabled.indexOf(a.filename);
-      const bIndex = safeEnabled.indexOf(b.filename);
-      const aEnabled = aIndex !== -1;
-      const bEnabled = bIndex !== -1;
-
-      if (aEnabled && bEnabled) {
-        return aIndex - bIndex;
-      }
-      if (aEnabled) return -1;
-      if (bEnabled) return 1;
-      return a.filename.localeCompare(b.filename);
-    });
-  };
-
-  const fetchFiles = async (latestEnabledFiles?: string[]) => {
-    try {
-      // Validate with Array.isArray: onClick handlers may pass a MouseEvent as the first argument
-      const enabled = Array.isArray(latestEnabledFiles)
-        ? latestEnabledFiles
-        : await fetchEnabledFiles();
-      // Use agent-specific API
-      const fileList = await agentsApi.listAgentFiles(selectedAgent);
-      const sortedFiles = sortFilesByEnabled(
-        fileList as unknown as MarkdownFile[],
-        enabled,
-      );
-      setFiles(sortedFiles);
-      // Set workspace path (handle both Unix '/' and Windows '\' separators)
-      if (fileList.length > 0) {
-        setWorkspacePath(getParentDir(fileList[0].path));
-      } else {
-        setWorkspacePath("");
-      }
-    } catch (error) {
-      console.error("Failed to fetch files", error);
-      message.error("Failed to load file list");
-    }
-  };
-
   const fetchDailyMemories = async () => {
     try {
       const memoryList = await api.listDailyMemory();
@@ -156,9 +165,12 @@ export const useAgentsData = () => {
     }
   };
 
-  const handleFileClick = async (file: MarkdownFile) => {
-    if (file.filename === "MEMORY.md") {
-      if (expandedMemory && selectedFile?.filename === "MEMORY.md") {
+  const handleFileNodeClick = async (node: FileTreeNode) => {
+    if (node.type !== "file") return;
+
+    // Handle MEMORY.md specially
+    if (node.name === "MEMORY.md") {
+      if (expandedMemory && selectedFile?.path === node.path) {
         setExpandedMemory(false);
         return;
       } else {
@@ -167,11 +179,13 @@ export const useAgentsData = () => {
       }
     }
 
-    setSelectedFile(file);
+    setSelectedFile(nodeToSelectedFile(node));
     setLoading(true);
     try {
-      // Use agent-specific API
-      const data = await agentsApi.readAgentFile(selectedAgent, file.filename);
+      const data = await agentsApi.readAgentFileByPath(
+        selectedAgent,
+        node.path,
+      );
       setFileContent(data.content);
       setOriginalContent(data.content);
     } catch (error) {
@@ -180,6 +194,18 @@ export const useAgentsData = () => {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleFolderToggle = (folderPath: string) => {
+    setExpandedFolders((prev) => {
+      const newSet = new Set(prev);
+      if (newSet.has(folderPath)) {
+        newSet.delete(folderPath);
+      } else {
+        newSet.add(folderPath);
+      }
+      return newSet;
+    });
   };
 
   const handleDailyMemoryClick = async (daily: DailyMemoryFile) => {
@@ -212,14 +238,18 @@ export const useAgentsData = () => {
         const date = selectedFile.filename.replace(".md", "");
         await api.saveDailyMemory(date, fileContent);
       } else {
-        await api.saveFile(selectedFile.filename, fileContent);
+        await agentsApi.writeAgentFileByPath(
+          selectedAgent,
+          selectedFile.path,
+          fileContent,
+        );
       }
       setOriginalContent(fileContent);
       message.success("Saved successfully");
       if (selectedFile.filename.match(/^\d{4}-\d{2}-\d{2}\.md$/)) {
         fetchDailyMemories();
       } else {
-        fetchFiles();
+        fetchFileTree();
       }
     } catch (error) {
       console.error("Failed to save file", error);
@@ -276,19 +306,20 @@ export const useAgentsData = () => {
   const hasChanges = fileContent !== originalContent;
 
   return {
-    files,
+    fileTree,
     selectedFile,
     dailyMemories,
     expandedMemory,
+    expandedFolders,
     fileContent,
     loading,
     workspacePath,
     hasChanges,
     enabledFiles,
     setFileContent,
-    fetchFiles,
-    fetchDailyMemories,
-    handleFileClick,
+    fetchFileTree,
+    handleFileNodeClick,
+    handleFolderToggle,
     handleDailyMemoryClick,
     handleSave,
     handleReset,

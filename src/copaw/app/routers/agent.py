@@ -3,6 +3,8 @@
 
 import asyncio
 import logging
+from datetime import datetime
+from pathlib import Path
 
 from fastapi import APIRouter, Body, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -31,6 +33,20 @@ class MdFileInfo(BaseModel):
     modified_time: str = Field(..., description="Modified time")
 
 
+class FileTreeNode(BaseModel):
+    """File tree node representing a file or folder."""
+
+    name: str = Field(..., description="File or folder name")
+    path: str = Field(..., description="Relative path from workspace")
+    type: str = Field(..., description="'file' or 'directory'")
+    size: int = Field(0, description="Size in bytes (0 for directories)")
+    modified_time: str = Field(..., description="Modification time")
+    children: list["FileTreeNode"] = Field(
+        default_factory=list,
+        description="Child nodes (for directories)",
+    )
+
+
 class MdFileContent(BaseModel):
     """Markdown file content."""
 
@@ -57,6 +73,80 @@ async def list_working_files(
             for file in workspace_manager.list_working_mds()
         ]
         return files
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+def _build_file_tree(root: Path, current: Path) -> list[FileTreeNode]:
+    """Build file tree recursively.
+
+    Args:
+        root: The workspace root directory
+        current: The current directory to list
+
+    Returns:
+        List of FileTreeNode representing files and folders
+    """
+    nodes: list[FileTreeNode] = []
+
+    try:
+        entries = sorted(
+            current.iterdir(), key=lambda e: (e.is_file(), e.name.lower())
+        )
+    except (PermissionError, OSError):
+        return nodes
+
+    for entry in entries:
+        try:
+            stat = entry.stat()
+            modified_time = datetime.fromtimestamp(stat.st_mtime).isoformat()
+            relative_path = entry.relative_to(root).as_posix()
+
+            if entry.is_dir():
+                children = _build_file_tree(root, entry)
+                nodes.append(
+                    FileTreeNode(
+                        name=entry.name,
+                        path=relative_path,
+                        type="directory",
+                        size=0,
+                        modified_time=modified_time,
+                        children=children,
+                    )
+                )
+            else:
+                nodes.append(
+                    FileTreeNode(
+                        name=entry.name,
+                        path=relative_path,
+                        type="file",
+                        size=stat.st_size,
+                        modified_time=modified_time,
+                        children=[],
+                    )
+                )
+        except (PermissionError, OSError):
+            continue
+
+    return nodes
+
+
+@router.get(
+    "/file-tree",
+    response_model=list[FileTreeNode],
+    summary="List all workspace files as a tree",
+    description="List all files and folders in workspace recursively",
+)
+async def list_file_tree(request: Request) -> list[FileTreeNode]:
+    """List all workspace files as a tree structure."""
+    try:
+        workspace = await get_agent_for_request(request)
+        workspace_dir = workspace.workspace_dir
+        
+        if not workspace_dir.is_dir():
+            return []
+        
+        return _build_file_tree(workspace_dir, workspace_dir)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -104,6 +194,70 @@ async def write_working_file(
         )
         workspace_manager.write_working_md(md_name, body.content)
         return {"written": True}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get(
+    "/file",
+    response_model=MdFileContent,
+    summary="Read any file by path",
+    description="Read any file in workspace by relative path",
+)
+async def read_file_by_path(
+    request: Request,
+    path: str,
+) -> MdFileContent:
+    """Read any file in workspace by relative path."""
+    try:
+        workspace = await get_agent_for_request(request)
+        workspace_dir = workspace.workspace_dir
+        file_path = workspace_dir / path
+        
+        # Security check: ensure the file is within workspace
+        if not str(file_path.resolve()).startswith(str(workspace_dir.resolve())):
+            raise HTTPException(status_code=403, detail="Path outside workspace")
+        
+        if not file_path.exists():
+            raise HTTPException(status_code=404, detail=f"File not found: {path}")
+        
+        if not file_path.is_file():
+            raise HTTPException(status_code=400, detail=f"Not a file: {path}")
+        
+        content = file_path.read_text(encoding="utf-8")
+        return MdFileContent(content=content)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.put(
+    "/file",
+    response_model=dict,
+    summary="Write any file by path",
+    description="Create or update any file in workspace by relative path",
+)
+async def write_file_by_path(
+    request: Request,
+    path: str,
+    body: MdFileContent,
+) -> dict:
+    """Write any file in workspace by relative path."""
+    try:
+        workspace = await get_agent_for_request(request)
+        workspace_dir = workspace.workspace_dir
+        file_path = workspace_dir / path
+        
+        # Security check: ensure the file is within workspace
+        if not str(file_path.resolve()).startswith(str(workspace_dir.resolve())):
+            raise HTTPException(status_code=403, detail="Path outside workspace")
+        
+        # Create parent directories if needed
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        file_path.write_text(body.content, encoding="utf-8")
+        return {"written": True, "path": path}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 

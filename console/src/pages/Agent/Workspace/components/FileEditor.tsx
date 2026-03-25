@@ -1,14 +1,18 @@
 import React, { useState, useMemo } from "react";
 import { Button, Card, Input, Switch, message } from "@agentscope-ai/design";
 import { CopyOutlined, UndoOutlined, SaveOutlined } from "@ant-design/icons";
-import type { MarkdownFile } from "../../../../api/types";
 import { XMarkdown } from "@ant-design/x-markdown";
 import { useTranslation } from "react-i18next";
 import { stripFrontmatter } from "../../../../utils/markdown";
 import styles from "../index.module.less";
 
+interface SelectedFile {
+  filename: string;
+  path: string;
+}
+
 interface FileEditorProps {
-  selectedFile: MarkdownFile | null;
+  selectedFile: SelectedFile | null;
   fileContent: string;
   loading: boolean;
   hasChanges: boolean;

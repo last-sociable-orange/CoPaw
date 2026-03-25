@@ -9,18 +9,20 @@ import { useTranslation } from "react-i18next";
 export default function WorkspacePage() {
   const { t } = useTranslation();
   const {
-    files,
+    fileTree,
     selectedFile,
     dailyMemories,
     expandedMemory,
+    expandedFolders,
     fileContent,
     loading,
     workspacePath,
     hasChanges,
     enabledFiles,
     setFileContent,
-    fetchFiles,
-    handleFileClick,
+    fetchFileTree,
+    handleFileNodeClick,
+    handleFolderToggle,
     handleDailyMemoryClick,
     handleSave,
     handleReset,
@@ -82,6 +84,7 @@ export default function WorkspacePage() {
       const result = await workspaceApi.uploadFile(file);
       if (result.success) {
         message.success(t("workspace.uploadSuccess"));
+        fetchFileTree();
       } else {
         message.error(t("workspace.uploadFailed") + ": " + result.message);
       }
@@ -140,14 +143,16 @@ export default function WorkspacePage() {
 
       <div className={styles.content}>
         <FileListPanel
-          files={files}
+          fileTree={fileTree}
           selectedFile={selectedFile}
           dailyMemories={dailyMemories}
           expandedMemory={expandedMemory}
+          expandedFolders={expandedFolders}
           workspacePath={workspacePath}
           enabledFiles={enabledFiles}
-          onRefresh={fetchFiles}
-          onFileClick={handleFileClick}
+          onRefresh={fetchFileTree}
+          onFileClick={handleFileNodeClick}
+          onFolderToggle={handleFolderToggle}
           onDailyMemoryClick={handleDailyMemoryClick}
           onToggleEnabled={handleToggleFileEnabled}
           onReorder={handleReorderFiles}

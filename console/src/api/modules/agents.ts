@@ -5,7 +5,11 @@ import type {
   CreateAgentRequest,
   AgentProfileRef,
 } from "../types/agents";
-import type { MdFileInfo, MdFileContent } from "../types/workspace";
+import type {
+  MdFileInfo,
+  MdFileContent,
+  FileTreeNode,
+} from "../types/workspace";
 
 // Multi-agent management API
 export const agentsApi = {
@@ -36,18 +40,38 @@ export const agentsApi = {
       method: "DELETE",
     }),
 
-  // Agent workspace files
+  // Agent workspace files (legacy flat list)
   listAgentFiles: (agentId: string) =>
-    request<MdFileInfo[]>(`/agents/${agentId}/files`),
+    request<MdFileInfo[]>(`/agents/${agentId}/agent/files`),
+
+  // Agent workspace file tree (hierarchical)
+  getAgentFileTree: (agentId: string) =>
+    request<FileTreeNode[]>(`/agents/${agentId}/agent/file-tree`),
+
+  // Read file by path (supports nested files)
+  readAgentFileByPath: (agentId: string, filePath: string) =>
+    request<MdFileContent>(
+      `/agents/${agentId}/agent/file?path=${encodeURIComponent(filePath)}`,
+    ),
+
+  // Write file by path (supports nested files)
+  writeAgentFileByPath: (agentId: string, filePath: string, content: string) =>
+    request<{ written: boolean; path: string }>(
+      `/agents/${agentId}/agent/file?path=${encodeURIComponent(filePath)}`,
+      {
+        method: "PUT",
+        body: JSON.stringify({ content }),
+      },
+    ),
 
   readAgentFile: (agentId: string, filename: string) =>
     request<MdFileContent>(
-      `/agents/${agentId}/files/${encodeURIComponent(filename)}`,
+      `/agents/${agentId}/agent/files/${encodeURIComponent(filename)}`,
     ),
 
   writeAgentFile: (agentId: string, filename: string, content: string) =>
     request<{ written: boolean; filename: string }>(
-      `/agents/${agentId}/files/${encodeURIComponent(filename)}`,
+      `/agents/${agentId}/agent/files/${encodeURIComponent(filename)}`,
       {
         method: "PUT",
         body: JSON.stringify({ content }),
@@ -56,5 +80,5 @@ export const agentsApi = {
 
   // Agent memory files
   listAgentMemory: (agentId: string) =>
-    request<MdFileInfo[]>(`/agents/${agentId}/memory`),
+    request<MdFileInfo[]>(`/agents/${agentId}/agent/memory`),
 };
